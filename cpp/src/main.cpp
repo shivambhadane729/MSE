@@ -1,4 +1,6 @@
 #include <iostream>
+#include <cstdlib>
+#include <algorithm>
 #include <vector>
 #include <thread>
 #include <chrono>
@@ -14,91 +16,104 @@
 #include "structures/SegmentTree.hpp"
 #include "structures/AVLTree.hpp"
 
+#include "ui/Dashboard.hpp"
+#include <QApplication>
+
 // Global Window Manager for the session
 std::map<int, ProcessWindow> windowManager;
 
-void displayDashboard(const SystemMetrics& sys, const std::vector<ProcessMetrics>& procs, 
-                      const std::map<int, std::string>& tiers,
-                      const std::map<int, double>& peakMemories) {
-    std::cout << "\033[2J\033[1;1H"; // Clear screen
-    std::cout << "======================================================================" << std::endl;
-    std::cout << "   AMSE C++ CORE ENGINE (LINUX/WSL) - FULL ANALYTICS v1.1             " << std::endl;
-    std::cout << "======================================================================" << std::endl;
-    std::cout << "CPU: [" << std::fixed << std::setprecision(1) << sys.cpu_percent << "%] | "
-              << "RAM: " << sys.memory_percent << "% (" << sys.memory_used_mb << "/" << sys.memory_total_mb << " MB)" << std::endl;
-    std::cout << "----------------------------------------------------------------------" << std::endl;
-    
-    std::cout << std::left << std::setw(8) << "PID" 
-              << std::setw(20) << "NAME" 
-              << std::setw(15) << "MEM (MB)" 
-              << std::setw(12) << "PEAK (MB)"
-              << "TIER" << std::endl;
-    std::cout << "----------------------------------------------------------------------" << std::endl;
-
-    for (size_t i = 0; i < std::min(procs.size(), (size_t)15); ++i) {
-        int pid = procs[i].pid;
-        std::string tier = tiers.count(pid) ? tiers.at(pid) : "Neutral";
-        double peak = peakMemories.count(pid) ? peakMemories.at(pid) : procs[i].memory_rss_mb;
-        
-        std::string color = "\033[0m"; // Default
-        if (tier == "Hot") color = "\033[1;36m"; // Cyan
-        if (tier == "Cold") color = "\033[1;90m"; // Gray
-        if (tier == "Anomalous") color = "\033[1;31m"; // Red
-
-        std::cout << std::left << std::setw(8) << pid 
-                  << std::setw(20) << procs[i].name 
-                  << std::setw(15) << procs[i].memory_rss_mb 
-                  << std::setw(12) << std::setprecision(1) << peak
-                  << color << tier << "\033[0m" << std::endl;
-    }
-    std::cout << "======================================================================" << std::endl;
-    std::cout << "S-TREE: O(log N) Peaks | AVL: Balanced Range Queries | Status: ACTIVE" << std::endl;
-}
-
-int main() {
+void runCLILoop() {
     ProcessTrie trie;
     MLEngine ml;
-    
-    std::cout << "Initializing AMSE C++ Engine Modules..." << std::endl;
-    
     while (true) {
         SystemMetrics sys = LinuxMetrics::getSystemMetrics();
         std::vector<ProcessMetrics> processes = LinuxMetrics::getAllProcessesMetrics();
-        std::map<int, std::string> tiers;
-        std::map<int, double> peakMemories;
-        AVLTree avl; // Rebuilt every cycle for real-time range queries
+        
+        // Clear screen (Linux/WSL)
+        std::cout << "\033[2J\033[H"; 
+        
+        std::cout << "===============================================================" << std::endl;
+        std::cout << "  AMSE - Adaptive Multi-Layer Storage Engine (Terminal)" << std::endl;
+        std::cout << "  Timestamp: " << sys.timestamp;
+        std::cout << "  CPU Usage: " << std::fixed << std::setprecision(1) << sys.cpu_percent << "% | ";
+        std::cout << "  Memory: " << sys.memory_used_mb << " / " << sys.memory_total_mb << " MB (" << sys.memory_percent << "%)" << std::endl;
+        std::cout << "===============================================================" << std::endl;
+        std::cout << std::left << std::setw(8) << "PID" << std::setw(20) << "NAME" << std::setw(12) << "MEM (MB)" << std::setw(10) << "PEAK" << std::setw(8) << "TIER" << std::endl;
+        std::cout << "---------------------------------------------------------------" << std::endl;
 
-        // Analytics Cycle
+        // Sort by memory to show top ones
+        std::sort(processes.begin(), processes.end(), [](const ProcessMetrics& a, const ProcessMetrics& b) {
+            return a.memory_rss_mb > b.memory_rss_mb;
+        });
+
+        int displayed = 0;
         for (const auto& p : processes) {
-            int pid = p.pid;
-            
-            // 1. Update Windows
-            windowManager[pid].addSnapshot(p);
-            
-            // 2. Compute Features
-            auto history = windowManager[pid].getHistory();
+            if (displayed++ >= 15) break; // Top 15
+
+            windowManager[p.pid].addSnapshot(p);
+            auto history = windowManager[p.pid].getHistory();
             double trend = FeatureProcessor::computeTrend(history);
             double freq = FeatureProcessor::computeFrequency(history);
             
-            // 3. Segment Tree Peak Query
             std::vector<double> memHistory;
             for(const auto& h : history) memHistory.push_back(h.memory_rss_mb);
             SegmentTree st(memHistory);
-            peakMemories[pid] = st.query(0, memHistory.size() - 1);
+            double peakMemory = st.query(0, memHistory.size() - 1);
             
-            // 4. ML Detection & Scoring
-            bool anomalous = ml.isAnomalous(p.memory_rss_mb, p.cpu_percent, trend);
-            double score = Scorer::calculateScore(freq, trend);
-            tiers[pid] = Scorer::classifyTier(score, anomalous);
+            bool anomalous = ml.isAnomalous(p, history, trend);
+            std::string tier = Scorer::classifyTier(Scorer::calculateScore(freq, trend), anomalous);
             
-            // 5. Indexing Structures
-            trie.insert(p.name, pid);
-            avl.insert(p.memory_rss_mb, pid);
+            std::cout << std::left << std::setw(8) << p.pid 
+                      << std::setw(20) << p.name.substr(0, 19) 
+                      << std::setw(12) << std::fixed << std::setprecision(1) << p.memory_rss_mb
+                      << std::setw(10) << peakMemory
+                      << std::setw(8) << tier << std::endl;
         }
         
-        displayDashboard(sys, processes, tiers, peakMemories);
+        std::cout << "---------------------------------------------------------------" << std::endl;
+        std::cout << "[CTRL+C to exit]" << std::endl;
+        
         std::this_thread::sleep_for(std::chrono::seconds(1));
     }
+}
+
+int main(int argc, char *argv[]) {
+    bool forceNoGui = false;
+    for (int i = 1; i < argc; ++i) {
+        if (std::string(argv[i]) == "--no-gui") {
+            forceNoGui = true;
+            break;
+        }
+    }
+
+    // 1. Check if we should run in GUI mode (if DISPLAY is set and not forced no-gui)
+    char* display = getenv("DISPLAY");
+    
+    if (display != nullptr && !forceNoGui) {
+        std::cout << "[INFO] Display detected. Launching Graphical Dashboard..." << std::endl;
+        try {
+            // Attempting to set XCB as fallback if wayland fails or isn't specified
+            if (getenv("QT_QPA_PLATFORM") == nullptr) {
+                setenv("QT_QPA_PLATFORM", "xcb", 0); 
+            }
+
+            QApplication app(argc, argv);
+            AMSEDashboard window;
+            window.show();
+            return app.exec();
+        } catch (...) {
+            std::cerr << "[ERROR] GUI Initialization failed. Falling back to Terminal..." << std::endl;
+        }
+    } 
+    
+    if (forceNoGui) {
+        std::cout << "[INFO] --no-gui flag detected. Using Terminal Dashboard." << std::endl;
+    } else if (display == nullptr) {
+        std::cout << "[INFO] No DISPLAY detected. Falling back to Terminal Dashboard." << std::endl;
+    }
+
+    // Fallback to Terminal Dashboard
+    runCLILoop();
     
     return 0;
 }
